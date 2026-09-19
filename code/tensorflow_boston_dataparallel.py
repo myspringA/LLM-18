@@ -40,6 +40,13 @@ with strategy.scope():
 max_epoch = 300
 history = model.fit(train_x, train_y, epochs=max_epoch, verbose=0)
 
+# 保存模型
+import os
+script_dir = os.path.dirname(os.path.abspath(__file__))
+model_path = os.path.join(script_dir, 'boston_model.keras')
+model.save(model_path)
+print(f'模型已保存到: {model_path}')
+
 # 绘制loss曲线
 plt.plot(np.arange(max_epoch), history.history['loss'])
 plt.title('Loss Value in all iterations')
