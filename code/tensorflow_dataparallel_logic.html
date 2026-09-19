@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>tensorflow_boston_dataparallel · 核心逻辑讲解</title>
+<style>
+  :root { --bg: #0f172a; --card: #1e293b; --accent: #38bdf8; --pink: #f472b6; --green: #34d399; --yellow: #fbbf24; --text: #e2e8f0; --muted: #94a3b8; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--text); line-height: 1.8; padding: 40px 20px; }
+  .wrap { max-width: 960px; margin: 0 auto; }
+  h1 { text-align: center; font-size: 28px; color: var(--accent); margin-bottom: 8px; }
+  .subtitle { text-align: center; color: var(--muted); font-size: 14px; margin-bottom: 50px; }
+  h2 { color: var(--accent); font-size: 20px; margin: 50px 0 16px; padding-left: 12px; border-left: 4px solid var(--accent); }
+  h3 { color: var(--pink); font-size: 16px; margin: 24px 0 10px; }
+  .card { background: var(--card); border-radius: 12px; padding: 28px; margin: 20px 0; }
+  .card p { color: var(--text); margin: 8px 0; }
+  .tag { display: inline-block; padding: 2px 10px; border-radius: 6px; font-size: 12px; margin-right: 6px; }
+  .tag-blue { background: #1e3a5f; color: var(--accent); }
+  .tag-pink { background: #3b1f3b; color: var(--pink); }
+  .tag-green { background: #1a3a2a; color: var(--green); }
+  .tag-yellow { background: #3a3520; color: var(--yellow); }
+  .mermaid { background: var(--card); border-radius: 12px; padding: 30px; margin: 20px 0; overflow-x: auto; }
+  .step { display: flex; gap: 16px; margin: 16px 0; align-items: flex-start; }
+  .step-num { flex-shrink: 0; width: 32px; height: 32px; border-radius: 50%; background: var(--accent); color: var(--bg); display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px; margin-top: 2px; }
+  .step-body { flex: 1; }
+  .step-body strong { color: var(--accent); }
+  .formula { background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 14px 20px; margin: 12px 0; font-family: "SF Mono", "Fira Code", monospace; font-size: 14px; color: var(--yellow); text-align: center; }
+  .note { background: #1a2744; border-left: 3px solid var(--yellow); padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 16px 0; font-size: 14px; color: var(--muted); }
+  svg text { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  .svg-wrap { background: var(--card); border-radius: 12px; padding: 24px; margin: 20px 0; text-align: center; }
+  .svg-wrap svg { max-width: 100%; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>🏠 Boston 房价预测 · 数据并行版</h1>
+<p class="subtitle">tensorflow_boston_dataparallel.py 核心逻辑讲解</p>
+
+<!-- ======================== 1. 整体流程 ======================== -->
+<h2>一、整体流程</h2>
+
+<div class="mermaid">
+flowchart LR
+    A["📂 数据加载<br/>housing.csv"] --> B["📐 数据预处理<br/>归一化"]
+    B --> C["✂️ 数据划分<br/>训练 75% / 测试 25%"]
+    C --> D["🪞 MirroredStrategy<br/>数据并行"]
+    D --> E["🧠 构建 & 训练<br/>神经网络"]
+    E --> F["📊 可视化评估<br/>Loss曲线 + 预测对比"]
+</div>
+
+<!-- ======================== 2. 数据处理 ======================== -->
+<h2>二、数据加载与预处理</h2>
+
+<div class="card">
+  <div class="step">
+    <div class="step-num">1</div>
+    <div class="step-body">
+      <strong>加载数据</strong><br/>
+      从 <code>housing.csv</code> 读取 Boston 房价数据集，共 <span class="tag tag-blue">506 条样本</span>
+      <span class="tag tag-green">13 个特征</span>（房间数、犯罪率、学区等）
+      <span class="tag tag-pink">1 个目标值</span>（房价中位数）
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num">2</div>
+    <div class="step-body">
+      <strong>MinMaxScaler 归一化</strong><br/>
+      将每个特征缩放到 <b>[0, 1]</b> 区间。不同特征量纲差异巨大（犯罪率 0.01 vs 税率 600+），
+      归一化让神经网络各权重在相同尺度上学习，加速收敛。
+    </div>
+  </div>
+  <div class="formula">X_scaled = (X - X_min) / (X_max - X_min)</div>
+  <div class="step">
+    <div class="step-num">3</div>
+    <div class="step-body">
+      <strong>划分训练集 / 测试集</strong><br/>
+      75% 用于训练（≈380 条），25% 用于测试（≈127 条），随机打乱后切分，防止数据泄露。
+    </div>
+  </div>
+</div>
+
+<!-- ======================== 3. 神经网络结构 ======================== -->
+<h2>三、神经网络结构</h2>
+
+<div class="svg-wrap">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 480">
+  <defs>
+    <linearGradient id="neuronBlue" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#0284c7" stop-opacity="0.9"/>
+    </linearGradient>
+    <linearGradient id="neuronPink" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f472b6" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#db2777" stop-opacity="0.9"/>
+    </linearGradient>
+    <linearGradient id="neuronGreen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#34d399" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#059669" stop-opacity="0.9"/>
+    </linearGradient>
+    <filter id="glow"><feGaussianBlur stdDeviation="3" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  </defs>
+
+  <!-- Layer labels -->
+  <text x="120" y="30" text-anchor="middle" fill="#38bdf8" font-size="15" font-weight="bold">输入层</text>
+  <text x="120" y="50" text-anchor="middle" fill="#94a3b8" font-size="12">13 个神经元</text>
+  <text x="410" y="30" text-anchor="middle" fill="#f472b6" font-size="15" font-weight="bold">隐藏层</text>
+  <text x="410" y="50" text-anchor="middle" fill="#94a3b8" font-size="12">10 个神经元 · ReLU</text>
+  <text x="700" y="30" text-anchor="middle" fill="#34d399" font-size="15" font-weight="bold">输出层</text>
+  <text x="700" y="50" text-anchor="middle" fill="#94a3b8" font-size="12">1 个神经元</text>
+
+  <!-- Connections: input to hidden -->
+  <g opacity="0.15" stroke="#38bdf8" stroke-width="0.8">
+    <!-- We draw a grid of lines from 13 input neurons to 10 hidden neurons -->
+    <!-- Input Y positions: 80,112,144,176,208,240,272,304,336,368,400,432,464 step=32 starting at 80 -->
+    <!-- Hidden Y positions: 112,152,192,232,272,312,352,392,432,464... let me use 10 neurons centered -->
+    <!-- Input: 13 neurons, y from 80 to 448, step = (448-80)/12 = 30.67 ≈ 31 -->
+    <!-- Hidden: 10 neurons, y from 112 to 432, step = (432-112)/9 = 35.56 ≈ 36 -->
+  </g>
+
+  <!-- Draw connections programmatically with a cleaner approach -->
+  <!-- Input neurons at x=120, y = 80, 110, 140, 170, 200, 230, 260, 290, 320, 350, 380, 410 -->
+  <!-- Hidden neurons at x=410, y = 110, 146, 182, 218, 254, 290, 326, 362, 398, 434 -->
+  <!-- Output neuron at x=700, y = 262 -->
+
+  <!-- Connection lines: Input → Hidden -->
+  <g stroke="#475569" stroke-width="0.5" opacity="0.4">
+    <!-- Input 0 (y=80) to all hidden -->
+    <line x1="138" y1="80" x2="392" y2="110"/><line x1="138" y1="80" x2="392" y2="146"/>
+    <line x1="138" y1="80" x2="392" y2="182"/><line x1="138" y1="80" x2="392" y2="218"/>
+    <line x1="138" y1="80" x2="392" y2="254"/><line x1="138" y1="80" x2="392" y2="290"/>
+    <line x1="138" y1="80" x2="392" y2="326"/><line x1="138" y1="80" x2="392" y2="362"/>
+    <line x1="138" y1="80" x2="392" y2="398"/><line x1="138" y1="80" x2="392" y2="434"/>
+    <!-- Input 1 (y=110) -->
+    <line x1="138" y1="110" x2="392" y2="110"/><line x1="138" y1="110" x2="392" y2="146"/>
+    <line x1="138" y1="110" x2="392" y2="182"/><line x1="138" y1="110" x2="392" y2="218"/>
+    <line x1="138" y1="110" x2="392" y2="254"/><line x1="138" y1="110" x2="392" y2="290"/>
+    <line x1="138" y1="110" x2="392" y2="326"/><line x1="138" y1="110" x2="392" y2="362"/>
+    <line x1="138" y1="110" x2="392" y2="398"/><line x1="138" y1="110" x2="392" y2="434"/>
+    <!-- Input 2 (y=140) -->
+    <line x1="138" y1="140" x2="392" y2="110"/><line x1="138" y1="140" x2="392" y2="146"/>
+    <line x1="138" y1="140" x2="392" y2="182"/><line x1="138" y1="140" x2="392" y2="218"/>
+    <line x1="138" y1="140" x2="392" y2="254"/><line x1="138" y1="140" x2="392" y2="290"/>
+    <line x1="138" y1="140" x2="392" y2="326"/><line x1="138" y1="140" x2="392" y2="362"/>
+    <line x1="138" y1="140" x2="392" y2="398"/><line x1="138" y1="140" x2="392" y2="434"/>
+    <!-- Input 3 (y=170) -->
+    <line x1="138" y1="170" x2="392" y2="110"/><line x1="138" y1="170" x2="392" y2="146"/>
+    <line x1="138" y1="170" x2="392" y2="182"/><line x1="138" y1="170" x2="392" y2="218"/>
+    <line x1="138" y1="170" x2="392" y2="254"/><line x1="138" y1="170" x2="392" y2="290"/>
+    <line x1="138" y1="170" x2="392" y2="326"/><line x1="138" y1="170" x2="392" y2="362"/>
+    <line x1="138" y1="170" x2="392" y2="398"/><line x1="138" y1="170" x2="392" y2="434"/>
+    <!-- Input 4 (y=200) -->
+    <line x1="138" y1="200" x2="392" y2="110"/><line x1="138" y1="200" x2="392" y2="146"/>
+    <line x1="138" y1="200" x2="392" y2="182"/><line x1="138" y1="200" x2="392" y2="218"/>
+    <line x1="138" y1="200" x2="392" y2="254"/><line x1="138" y1="200" x2="392" y2="290"/>
+    <line x1="138" y1="200" x2="392" y2="326"/><line x1="138" y1="200" x2="392" y2="362"/>
+    <line x1="138" y1="200" x2="392" y2="398"/><line x1="138" y1="200" x2="392" y2="434"/>
+    <!-- Input 5 (y=230) -->
+    <line x1="138" y1="230" x2="392" y2="110"/><line x1="138" y1="230" x2="392" y2="146"/>
+    <line x1="138" y1="230" x2="392" y2="182"/><line x1="138" y1="230" x2="392" y2="218"/>
+    <line x1="138" y1="230" x2="392" y2="254"/><line x1="138" y1="230" x2="392" y2="290"/>
+    <line x1="138" y1="230" x2="392" y2="326"/><line x1="138" y1="230" x2="392" y2="362"/>
+    <line x1="138" y1="230" x2="392" y2="398"/><line x1="138" y1="230" x2="392" y2="434"/>
+    <!-- Input 6 (y=260) -->
+    <line x1="138" y1="260" x2="392" y2="110"/><line x1="138" y1="260" x2="392" y2="146"/>
+    <line x1="138" y1="260" x2="392" y2="182"/><line x1="138" y1="260" x2="392" y2="218"/>
+    <line x1="138" y1="260" x2="392" y2="254"/><line x1="138" y1="260" x2="392" y2="290"/>
+    <line x1="138" y1="260" x2="392" y2="326"/><line x1="138" y1="260" x2="392" y2="362"/>
+    <line x1="138" y1="260" x2="392" y2="398"/><line x1="138" y1="260" x2="392" y2="434"/>
+    <!-- Input 7 (y=290) -->
+    <line x1="138" y1="290" x2="392" y2="110"/><line x1="138" y1="290" x2="392" y2="146"/>
+    <line x1="138" y1="290" x2="392" y2="182"/><line x1="138" y1="290" x2="392" y2="218"/>
+    <line x1="138" y1="290" x2="392" y2="254"/><line x1="138" y1="290" x2="392" y2="290"/>
+    <line x1="138" y1="290" x2="392" y2="326"/><line x1="138" y1="290" x2="392" y2="362"/>
+    <line x1="138" y1="290" x2="392" y2="398"/><line x1="138" y1="290" x2="392" y2="434"/>
+    <!-- Input 8 (y=320) -->
+    <line x1="138" y1="320" x2="392" y2="110"/><line x1="138" y1="320" x2="392" y2="146"/>
+    <line x1="138" y1="320" x2="392" y2="182"/><line x1="138" y1="320" x2="392" y2="218"/>
+    <line x1="138" y1="320" x2="392" y2="254"/><line x1="138" y1="320" x2="392" y2="290"/>
+    <line x1="138" y1="320" x2="392" y2="326"/><line x1="138" y1="320" x2="392" y2="362"/>
+    <line x1="138" y1="320" x2="392" y2="398"/><line x1="138" y1="320" x2="392" y2="434"/>
+    <!-- Input 9 (y=350) -->
+    <line x1="138" y1="350" x2="392" y2="110"/><line x1="138" y1="350" x2="392" y2="146"/>
+    <line x1="138" y1="350" x2="392" y2="182"/><line x1="138" y1="350" x2="392" y2="218"/>
+    <line x1="138" y1="350" x2="392" y2="254"/><line x1="138" y1="350" x2="392" y2="290"/>
+    <line x1="138" y1="350" x2="392" y2="326"/><line x1="138" y1="350" x2="392" y2="362"/>
+    <line x1="138" y1="350" x2="392" y2="398"/><line x1="138" y1="350" x2="392" y2="434"/>
+    <!-- Input 10 (y=380) -->
+    <line x1="138" y1="380" x2="392" y2="110"/><line x1="138" y1="380" x2="392" y2="146"/>
+    <line x1="138" y1="380" x2="392" y2="182"/><line x1="138" y1="380" x2="392" y2="218"/>
+    <line x1="138" y1="380" x2="392" y2="254"/><line x1="138" y1="380" x2="392" y2="290"/>
+    <line x1="138" y1="380" x2="392" y2="326"/><line x1="138" y1="380" x2="392" y2="362"/>
+    <line x1="138" y1="380" x2="392" y2="398"/><line x1="138" y1="380" x2="392" y2="434"/>
+    <!-- Input 11 (y=410) -->
+    <line x1="138" y1="410" x2="392" y2="110"/><line x1="138" y1="410" x2="392" y2="146"/>
+    <line x1="138" y1="410" x2="392" y2="182"/><line x1="138" y1="410" x2="392" y2="218"/>
+    <line x1="138" y1="410" x2="392" y2="254"/><line x1="138" y1="410" x2="392" y2="290"/>
+    <line x1="138" y1="410" x2="392" y2="326"/><line x1="138" y1="410" x2="392" y2="362"/>
+    <line x1="138" y1="410" x2="392" y2="398"/><line x1="138" y1="410" x2="392" y2="434"/>
+    <!-- Input 12 (y=440) -->
+    <line x1="138" y1="440" x2="392" y2="110"/><line x1="138" y1="440" x2="392" y2="146"/>
+    <line x1="138" y1="440" x2="392" y2="182"/><line x1="138" y1="440" x2="392" y2="218"/>
+    <line x1="138" y1="440" x2="392" y2="254"/><line x1="138" y1="440" x2="392" y2="290"/>
+    <line x1="138" y1="440" x2="392" y2="326"/><line x1="138" y1="440" x2="392" y2="362"/>
+    <line x1="138" y1="440" x2="392" y2="398"/><line x1="138" y1="440" x2="392" y2="434"/>
+  </g>
+
+  <!-- Connection lines: Hidden → Output -->
+  <g stroke="#475569" stroke-width="0.8" opacity="0.5">
+    <line x1="428" y1="110" x2="682" y2="262"/><line x1="428" y1="146" x2="682" y2="262"/>
+    <line x1="428" y1="182" x2="682" y2="262"/><line x1="428" y1="218" x2="682" y2="262"/>
+    <line x1="428" y1="254" x2="682" y2="262"/><line x1="428" y1="290" x2="682" y2="262"/>
+    <line x1="428" y1="326" x2="682" y2="262"/><line x1="428" y1="362" x2="682" y2="262"/>
+    <line x1="428" y1="398" x2="682" y2="262"/><line x1="428" y1="434" x2="682" y2="262"/>
+  </g>
+
+  <!-- Input neurons -->
+  <g filter="url(#glow)">
+    <circle cx="120" cy="80" r="16" fill="url(#neuronBlue)"/><text x="120" y="84" text-anchor="middle" fill="#fff" font-size="9">x₁</text>
+    <circle cx="120" cy="110" r="16" fill="url(#neuronBlue)"/><text x="120" y="114" text-anchor="middle" fill="#fff" font-size="9">x₂</text>
+    <circle cx="120" cy="140" r="16" fill="url(#neuronBlue)"/><text x="120" y="144" text-anchor="middle" fill="#fff" font-size="9">x₃</text>
+    <circle cx="120" cy="170" r="16" fill="url(#neuronBlue)"/><text x="120" y="174" text-anchor="middle" fill="#fff" font-size="9">x₄</text>
+    <circle cx="120" cy="200" r="16" fill="url(#neuronBlue)"/><text x="120" y="204" text-anchor="middle" fill="#fff" font-size="9">x₅</text>
+    <circle cx="120" cy="230" r="16" fill="url(#neuronBlue)"/><text x="120" y="234" text-anchor="middle" fill="#fff" font-size="9">x₆</text>
+    <circle cx="120" cy="260" r="16" fill="url(#neuronBlue)"/><text x="120" y="264" text-anchor="middle" fill="#fff" font-size="9">x₇</text>
+    <circle cx="120" cy="290" r="16" fill="url(#neuronBlue)"/><text x="120" y="294" text-anchor="middle" fill="#fff" font-size="9">x₈</text>
+    <circle cx="120" cy="320" r="16" fill="url(#neuronBlue)"/><text x="120" y="324" text-anchor="middle" fill="#fff" font-size="9">x₉</text>
+    <circle cx="120" cy="350" r="16" fill="url(#neuronBlue)"/><text x="120" y="354" text-anchor="middle" fill="#fff" font-size="9">x₁₀</text>
+    <circle cx="120" cy="380" r="16" fill="url(#neuronBlue)"/><text x="120" y="384" text-anchor="middle" fill="#fff" font-size="9">x₁₁</text>
+    <circle cx="120" cy="410" r="16" fill="url(#neuronBlue)"/><text x="120" y="414" text-anchor="middle" fill="#fff" font-size="9">x₁₂</text>
+    <circle cx="120" cy="440" r="16" fill="url(#neuronBlue)"/><text x="120" y="444" text-anchor="middle" fill="#fff" font-size="9">x₁₃</text>
+  </g>
+
+  <!-- Hidden neurons -->
+  <g filter="url(#glow)">
+    <circle cx="410" cy="110" r="18" fill="url(#neuronPink)"/><text x="410" y="114" text-anchor="middle" fill="#fff" font-size="9">h₁</text>
+    <circle cx="410" cy="146" r="18" fill="url(#neuronPink)"/><text x="410" y="150" text-anchor="middle" fill="#fff" font-size="9">h₂</text>
+    <circle cx="410" cy="182" r="18" fill="url(#neuronPink)"/><text x="410" y="186" text-anchor="middle" fill="#fff" font-size="9">h₃</text>
+    <circle cx="410" cy="218" r="18" fill="url(#neuronPink)"/><text x="410" y="222" text-anchor="middle" fill="#fff" font-size="9">h₄</text>
+    <circle cx="410" cy="254" r="18" fill="url(#neuronPink)"/><text x="410" y="258" text-anchor="middle" fill="#fff" font-size="9">h₅</text>
+    <circle cx="410" cy="290" r="18" fill="url(#neuronPink)"/><text x="410" y="294" text-anchor="middle" fill="#fff" font-size="9">h₆</text>
+    <circle cx="410" cy="326" r="18" fill="url(#neuronPink)"/><text x="410" y="330" text-anchor="middle" fill="#fff" font-size="9">h₇</text>
+    <circle cx="410" cy="362" r="18" fill="url(#neuronPink)"/><text x="410" y="366" text-anchor="middle" fill="#fff" font-size="9">h₈</text>
+    <circle cx="410" cy="398" r="18" fill="url(#neuronPink)"/><text x="410" y="402" text-anchor="middle" fill="#fff" font-size="9">h₉</text>
+    <circle cx="410" cy="434" r="18" fill="url(#neuronPink)"/><text x="410" y="438" text-anchor="middle" fill="#fff" font-size="9">h₁₀</text>
+  </g>
+
+  <!-- Output neuron -->
+  <g filter="url(#glow)">
+    <circle cx="700" cy="262" r="22" fill="url(#neuronGreen)"/>
+    <text x="700" y="267" text-anchor="middle" fill="#fff" font-size="11" font-weight="bold">ŷ</text>
+  </g>
+
+  <!-- Annotations -->
+  <text x="265" y="470" text-anchor="middle" fill="#64748b" font-size="11">13 × 10 = 130 个权重 + 10 偏置</text>
+  <text x="555" y="470" text-anchor="middle" fill="#64748b" font-size="11">10 × 1 = 10 个权重 + 1 偏置</text>
+  <text x="410" y="495" text-anchor="middle" fill="#fbbf24" font-size="12" font-weight="bold">总参数量: 151 (130+10+10+1)</text>
+</svg>
+</div>
+
+<div class="card">
+  <h3>网络结构说明</h3>
+  <p>这是一个 <b>全连接前馈神经网络</b>（MLP），共 3 层：</p>
+  <div class="step">
+    <div class="step-num">1</div>
+    <div class="step-body">
+      <span class="tag tag-blue">输入层</span> <b>13 个神经元</b> — 对应 Boston 房价的 13 个特征（犯罪率、房间数、交通便利性等）。每个神经元接收一个归一化后的特征值。
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num">2</div>
+    <div class="step-body">
+      <span class="tag tag-pink">隐藏层</span> <b>10 个神经元 · ReLU 激活</b> — 对输入做非线性组合。ReLU 函数将负值截为 0，正值保持不变，
+      让网络具备拟合非线性关系的能力。
+      <div class="formula">ReLU(z) = max(0, z) &nbsp;&nbsp; 其中 z = W₁·x + b₁</div>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num">3</div>
+    <div class="step-body">
+      <span class="tag tag-green">输出层</span> <b>1 个神经元</b> — 无激活函数（线性输出），直接输出预测的房价数值。回归任务不需要激活函数。
+    </div>
+  </div>
+  <div class="note">
+    💡 <b>参数量计算</b>：输入→隐藏 = 13×10 权重 + 10 偏置 = 140；隐藏→输出 = 10×1 权重 + 1 偏置 = 11。总计 <b>151 个可训练参数</b>。
+  </div>
+</div>
+
+<!-- ======================== 4. 数据并行 ======================== -->
+<h2>四、MirroredStrategy 数据并行</h2>
+
+<div class="svg-wrap">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 560">
+  <defs>
+    <linearGradient id="g1" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0f3460"/><stop offset="100%" stop-color="#16213e"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="10" markerHeight="7" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#38bdf8"/>
+    </marker>
+    <marker id="arrowSync" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="10" markerHeight="7" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#f472b6"/>
+    </marker>
+  </defs>
+
+  <text x="430" y="32" text-anchor="middle" fill="#38bdf8" font-size="18" font-weight="bold">MirroredStrategy · 单步训练流程</text>
+
+  <!-- Data -->
+  <rect x="310" y="55" width="240" height="42" rx="8" fill="url(#g1)" stroke="#38bdf8" stroke-width="1.5"/>
+  <text x="430" y="81" text-anchor="middle" fill="#fff" font-size="13">训练数据 · 自动均分到 N 个副本</text>
+
+  <line x1="360" y1="97" x2="200" y2="130" stroke="#38bdf8" stroke-width="1.2" marker-end="url(#arrow)"/>
+  <line x1="430" y1="97" x2="430" y2="130" stroke="#38bdf8" stroke-width="1.2" marker-end="url(#arrow)"/>
+  <line x1="500" y1="97" x2="660" y2="130" stroke="#38bdf8" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+  <!-- Replica 1 -->
+  <rect x="80" y="135" width="240" height="200" rx="10" fill="url(#g1)" stroke="#7c3aed" stroke-width="1.5"/>
+  <text x="200" y="162" text-anchor="middle" fill="#f472b6" font-size="13" font-weight="bold">🖥 副本 1</text>
+  <text x="200" y="190" text-anchor="middle" fill="#94a3b8" font-size="12">Batch 1/N</text>
+  <rect x="110" y="205" width="180" height="26" rx="5" fill="#1e293b"/>
+  <text x="200" y="223" text-anchor="middle" fill="#e2e8f0" font-size="11">前向传播：ŷ = f(x; W)</text>
+  <rect x="110" y="240" width="180" height="26" rx="5" fill="#1e293b"/>
+  <text x="200" y="258" text-anchor="middle" fill="#e2e8f0" font-size="11">Loss = MSE(y, ŷ)</text>
+  <rect x="110" y="275" width="180" height="26" rx="5" fill="#1e293b"/>
+  <text x="200" y="293" text-anchor="middle" fill="#e2e8f0" font-size="11">反向传播 → 梯度 ∇₁</text>
+  <rect x="120" y="310" width="160" height="18" rx="4" fill="none" stroke="#7c3aed" stroke-width="0.8" stroke-dasharray="3,2"/>
+  <text x="200" y="323" text-anchor="middle" fill="#a78bfa" font-size="10">模型副本（参数相同）</text>
+
+  <!-- Replica 2 -->
+  <rect x="310" y="135" width="240" height="200" rx="10" fill="url(#g1)" stroke="#7c3aed" stroke-width="1.5"/>
+  <text x="430" y="162" text-anchor="middle" fill="#f472b6" font-size="13" font-weight="bold">🖥 副本 2</text>
+  <text x="430" y="190" text-anchor="middle" fill="#94a3b8" font-size="12">Batch 2/N</text>
+  <rect x="340" y="205" width="180" height="26" rx="5" fill="#1e293b"/>
+  <text x="430" y="223" text-anchor="middle" fill="#e2e8f0" font-size="11">前向传播：ŷ = f(x; W)</text>
+  <rect x="340" y="240" width="180" height="26" rx="5" fill="#1e293b"/>
+  <text x="430" y="258" text-anchor="middle" fill="#e2e8f0" font-size="11">Loss = MSE(y, ŷ)</text>
+  <rect x="340" y="275" width="180" height="26" rx="5" fill="#1e293b"/>
+  <text x="430" y="293" text-anchor="middle" fill="#e2e8f0" font-size="11">反向传播 → 梯度 ∇₂</text>
+  <rect x="350" y="310" width="160" height="18" rx="4" fill="none" stroke="#7c3aed" stroke-width="0.8" stroke-dasharray="3,2"/>
+  <text x="430" y="323" text-anchor="middle" fill="#a78bfa" font-size="10">模型副本（参数相同）</text>
+
+  <!-- Replica N -->
+  <rect x="540" y="135" width="240" height="200" rx="10" fill="url(#g1)" stroke="#7c3aed" stroke-width="1.5"/>
+  <text x="660" y="162" text-anchor="middle" fill="#f472b6" font-size="13" font-weight="bold">🖥 副本 N</text>
+  <text x="660" y="190" text-anchor="middle" fill="#94a3b8" font-size="12">Batch N/N</text>
+  <rect x="570" y="205" width="180" height="26" rx="5" fill="#1e293b"/>
+  <text x="660" y="223" text-anchor="middle" fill="#e2e8f0" font-size="11">前向传播：ŷ = f(x; W)</text>
+  <rect x="570" y="240" width="180" height="26" rx="5" fill="#1e293b"/>
+  <text x="660" y="258" text-anchor="middle" fill="#e2e8f0" font-size="11">Loss = MSE(y, ŷ)</text>
+  <rect x="570" y="275" width="180" height="26" rx="5" fill="#1e293b"/>
+  <text x="660" y="293" text-anchor="middle" fill="#e2e8f0" font-size="11">反向传播 → 梯度 ∇ₙ</text>
+  <rect x="580" y="310" width="160" height="18" rx="4" fill="none" stroke="#7c3aed" stroke-width="0.8" stroke-dasharray="3,2"/>
+  <text x="660" y="323" text-anchor="middle" fill="#a78bfa" font-size="10">模型副本（参数相同）</text>
+
+  <!-- AllReduce -->
+  <line x1="200" y1="340" x2="430" y2="380" stroke="#f472b6" stroke-width="1.2" stroke-dasharray="5,3" marker-end="url(#arrowSync)"/>
+  <line x1="430" y1="340" x2="430" y2="380" stroke="#f472b6" stroke-width="1.2" stroke-dasharray="5,3" marker-end="url(#arrowSync)"/>
+  <line x1="660" y1="340" x2="430" y2="380" stroke="#f472b6" stroke-width="1.2" stroke-dasharray="5,3" marker-end="url(#arrowSync)"/>
+
+  <rect x="260" y="383" width="340" height="52" rx="10" fill="#1e293b" stroke="#f472b6" stroke-width="1.5"/>
+  <text x="430" y="406" text-anchor="middle" fill="#f472b6" font-size="14" font-weight="bold">AllReduce 梯度同步</text>
+  <text x="430" y="426" text-anchor="middle" fill="#94a3b8" font-size="12">∇_avg = (∇₁ + ∇₂ + ... + ∇ₙ) / N</text>
+
+  <!-- Update -->
+  <line x1="430" y1="435" x2="430" y2="462" stroke="#f472b6" stroke-width="1.2" stroke-dasharray="5,3" marker-end="url(#arrowSync)"/>
+
+  <rect x="260" y="465" width="340" height="38" rx="8" fill="url(#g1)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="430" y="489" text-anchor="middle" fill="#34d399" font-size="13">Adam 优化器更新参数：W ← W - lr · ∇_avg</text>
+
+  <!-- Loop arrow -->
+  <path d="M 750 485 Q 810 485 810 300 Q 810 115 750 115" fill="none" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#arrow)"/>
+  <text x="815" y="300" text-anchor="middle" fill="#fbbf24" font-size="11" transform="rotate(90 815 300)">重复 300 轮</text>
+</svg>
+</div>
+
+<div class="card">
+  <h3>数据并行原理</h3>
+  <p><code>tf.distribute.MirroredStrategy()</code> 是 TensorFlow 的单机多卡数据并行策略：</p>
+  <div class="step">
+    <div class="step-num">1</div>
+    <div class="step-body">
+      <strong>模型复制</strong> — 在每个可用 GPU 上创建一份<b>完全相同</b>的模型副本（参数初始值一致）
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num">2</div>
+    <div class="step-body">
+      <strong>数据切分</strong> — 每个 batch 被<b>均分</b>到各副本，每个副本只看到一部分数据
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num">3</div>
+    <div class="step-body">
+      <strong>独立前向 & 反向</strong> — 各副本用自己的那批数据独立做前向传播和反向传播，各自得到梯度
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num">4</div>
+    <div class="step-body">
+      <strong>AllReduce 同步</strong> — 所有副本的梯度<b>求平均</b>，得到统一梯度，然后用 Adam 统一更新所有副本的参数
+    </div>
+  </div>
+  <div class="note">
+    💡 <b>关键点</b>：<code>strategy.scope()</code> 是"作用域"——在这个 <code>with</code> 块内创建模型，TF 会自动将变量标记为"分布式变量"，
+    让 AllReduce 同步机制接管梯度和参数更新。<b>scope 外的代码（如 model.fit）无需任何改动</b>，TF 在底层自动分发。
+  </div>
+</div>
+
+<!-- ======================== 5. 训练与损失 ======================== -->
+<h2>五、训练过程</h2>
+
+<div class="card">
+  <div class="step">
+    <div class="step-num">1</div>
+    <div class="step-body">
+      <strong>损失函数 — MSE（均方误差）</strong>
+      <div class="formula">MSE = (1/n) · Σᵢ (yᵢ - ŷᵢ)²</div>
+      衡量预测值与真实房价的偏差平方均值。值越小，模型拟合越好。
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num">2</div>
+    <div class="step-body">
+      <strong>优化器 — Adam (lr = 0.01)</strong>
+      <p>Adam 结合了动量（Momentum）和自适应学习率（RMSProp）的优点，对每个参数维护独立的学习率，比标准 SGD 收敛更快更稳。</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num">3</div>
+    <div class="step-body">
+      <strong>训练 300 轮 (epochs)</strong>
+      <p>整个训练集被完整遍历 300 次。每轮所有副本独立计算 → AllReduce 同步 → 更新参数，Loss 逐步下降。</p>
+    </div>
+  </div>
+</div>
+
+<!-- ======================== 6. 评估 ======================== -->
+<h2>六、评估与可视化</h2>
+
+<div class="mermaid">
+flowchart LR
+    A["model.predict(test_x)"] --> B["📈 Loss 曲线<br/>观察收敛趋势"]
+    A --> C["🔴🟡 散点图<br/>预测值 vs 真实值"]
+    B --> D{"模型是否过拟合？"}
+    C --> D
+    D -->|Loss 持续下降且预测接近真实值| E["✅ 模型有效"]
+    D -->|Loss 波动或预测偏离大| F["⚠️ 需调参"]
+</div>
+
+<div class="card">
+  <p><b>Loss 曲线图</b>：横轴为训练轮次，纵轴为 MSE 损失。理想情况是曲线平滑下降并趋于平稳，说明模型已收敛。</p>
+  <p><b>预测 vs 真实值散点图</b>：红点为预测值，黄点为真实值。两组点越接近，说明模型预测越准确。</p>
+</div>
+
+<!-- ======================== 7. 对比 ======================== -->
+<h2>七、与普通版的关键差异</h2>
+
+<div class="card">
+  <table style="width:100%; border-collapse:collapse; font-size:14px;">
+    <tr style="border-bottom:1px solid #334155">
+      <th style="text-align:left; padding:10px; color:var(--accent)">对比项</th>
+      <th style="text-align:center; padding:10px; color:var(--muted)">普通版 tensorflow_boston.py</th>
+      <th style="text-align:center; padding:10px; color:var(--pink)">数据并行版</th>
+    </tr>
+    <tr style="border-bottom:1px solid #1e293b">
+      <td style="padding:10px">并行策略</td>
+      <td style="text-align:center; padding:10px">无（默认单设备）</td>
+      <td style="text-align:center; padding:10px; color:var(--pink)"><b>MirroredStrategy</b></td>
+    </tr>
+    <tr style="border-bottom:1px solid #1e293b">
+      <td style="padding:10px">模型创建</td>
+      <td style="text-align:center; padding:10px">直接 Sequential</td>
+      <td style="text-align:center; padding:10px; color:var(--pink)"><b>strategy.scope() 内</b></td>
+    </tr>
+    <tr style="border-bottom:1px solid #1e293b">
+      <td style="padding:10px">训练速度</td>
+      <td style="text-align:center; padding:10px">单卡</td>
+      <td style="text-align:center; padding:10px; color:var(--green)"><b>多卡并行，近线性加速</b></td>
+    </tr>
+    <tr>
+      <td style="padding:10px">代码改动量</td>
+      <td style="text-align:center; padding:10px; color:var(--muted)">基准</td>
+      <td style="text-align:center; padding:10px; color:var(--green)"><b>仅加 2 行</b>（strategy + scope）</td>
+    </tr>
+  </table>
+  <div class="note">
+    💡 <b>核心价值</b>：MirroredStrategy 的设计哲学是<b>最小代码改动获得多卡加速</b>——只需在模型创建时加上 <code>with strategy.scope()</code>，
+    <code>model.fit</code> 和 <code>model.predict</code> 完全不用改。
+  </div>
+</div>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad:true, theme:'dark', themeVariables:{primaryColor:'#1e293b',primaryBorderColor:'#38bdf8',primaryTextColor:'#e2e8f0',lineColor:'#38bdf8',fontSize:'14px'}});</script>
+</body>
+</html>
