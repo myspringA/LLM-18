@@ -1,0 +1,18 @@
+
+pytorch 原理
+
+# 训练
+max_epoch = 300
+iter_loss = []
+for i in range(max_epoch):
+    # 前向传播
+    y_pred = model(train_x)
+    # 计算损失
+    loss = criterion(y_pred, train_y)
+    iter_loss.append(loss.item())
+    # 清空梯度
+    optimizer.zero_grad()
+    # 反向传播
+    loss.backward()
+    # 更新参数
+    optimizer.step()
